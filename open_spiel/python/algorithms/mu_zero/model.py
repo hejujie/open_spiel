@@ -40,8 +40,17 @@ import tensorflow.compat.v1 as tf
 
 
 class BaseMuZeroModel(object):
-    def __init__(self):
-        pass
+    def __init__(self,
+                 observation_shape,
+                 num_actions,
+                 num_layers=2,
+                 num_hiddens=128,
+                 activation="relu"):
+        self.observation_shape = observation_shape
+        self.num_actions = num_actions
+        self.num_layers = num_layers
+        self.num_hiddens = num_hiddens
+        self.activation = activation
 
     def representation_network(self):
         raise NotImplementedError
@@ -52,11 +61,23 @@ class BaseMuZeroModel(object):
     def prediction_network(self):
         raise NotImplementedError
 
-    def initial_inference(self) -> tf.keras.Model:
-        pass
+    def initial_inference(self):
+        input_size = int(np.prod(self.observation_shape))
+        inputs = tf.keras.Input(
+            shape=input_size, dtype="float32", name="input")
+        hidden_state = self.representation_network(inputs)
+        reward = 0
+        value, policy_logits = self.prediction_network(hidden_state)
+        return tf.keras.Model(inputs=[inputs],
+                              outputs=[value, reward, policy_logits, hidden_state])
 
-    def recurrent_inference(self) -> tf.keras.Model:
-        pass
+    def recurrent_inference(self):
+        hidden_state = tf.keras.Input(
+            shape=self.num_hiddens, dtype="float32", name="hidden_state")
+        next_hidden_state, reward = self.dynamic_network(hidden_state)
+        value, policy_logits = self.prediction_network(hidden_state)
+        return tf.keras.Model(inputs=[hidden_state],
+                              outputs=[value, reward, policy_logits, next_hidden_state])
 
     def reward_transform(self):
         pass
@@ -71,6 +92,51 @@ class MuZeroGoModel(BaseMuZeroModel):
 
 class MuZeroAtariModel(BaseMuZeroModel):
     pass
+
+
+def keras_mlp(inputs,
+              num_layers=2,
+              num_hiddens=128,
+              activation="relu"):
+
+    output = inputs
+    for _ in range(num_layers):
+        output = tf.keras.layers.Dense(
+            num_hidden, activation=activation)(output)
+    return output
+
+
+class MuZeroMLPModel(BaseMuZeroModel):
+    def __init__(self,
+                 observation_shape,
+                 num_actions,
+                 num_layers=2,
+                 num_hiddens=128,
+                 activation="relu"):
+        super(MuZeroMLPModel, self).__init__()
+
+    def representation_network(self, inputs):
+        initial_hidden_state = keras_mlp(
+            inputs, self.num_layers, self.num_hiddens)
+        return initial_hidden_state
+
+    def prediction_network(self, hidden_state):
+        torse = keras_mlp(hidden_state, self.num_layers, self.num_hiddens)
+
+        policy_logits = tf.keras.layers.Dense(
+            self.num_actions, name="policy")(torso)
+        value = tf.keras.layers.Dense(
+            1, activation="tanh", name="value")(torso)
+        return value, policy_logits
+
+    def dynamic_network(self, hidden_state):
+        next_hidden_state = keras_mlp(
+            hidden_state, self.num_layers, self.num_hiddens)
+
+        torse = keras_mlp(
+            hidden_state, self.num_layers, self.num_hiddens)
+        reward = tf.keras.layers.Dense(
+            1, activation="tanh", name='reward')(torso)
 
 
 class Model(object):
@@ -89,13 +155,15 @@ class Model(object):
         self._optimizer = tf.train.AdamOptimizer(learning_rate)
         self._l2_regularization = l2_regularization
 
-    def initial_inference(self):
-        _ = self._muzero_model.initial_inference()
-        pass
+    def initial_inference(self, obs):
+        with self._device:
+            return self._muzero_model.initial_inference([
+                np.array(obs, dtype=np.float32)])
 
-    def recurrent_inference(self):
-        _ = self._muzero_model.recurrent_inference()
-        pass
+    def recurrent_inference(self, hidden_state):
+        with self._device:
+            return self._muzero_model.recurrent_inference_model([
+                np.array(hidden_state, dtype=np.float32)])
 
     def compute_loss(self):
         pass
@@ -145,15 +213,3 @@ def keras_resnet(inputs,
         return x
 
     return resnet_body(inputs, num_filters, kernel_size)
-
-
-def keras_mlp(inputs,
-              num_layers=2,
-              num_hiddens=128,
-              activation="relu"):
-
-    output = inputs
-    for _ in range(num_layers):
-        output = tf.keras.layers.Dense(
-            num_hidden, activation=activation)(output)
-    return output
