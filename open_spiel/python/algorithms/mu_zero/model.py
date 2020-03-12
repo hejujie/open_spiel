@@ -39,7 +39,7 @@ import numpy as np
 import tensorflow.compat.v1 as tf
 
 
-class BaseMuZeroModel(object):
+class MuZeroBaseModel(object):
     def __init__(self,
                  observation_shape,
                  num_actions,
@@ -61,16 +61,17 @@ class BaseMuZeroModel(object):
     def prediction_network(self):
         raise NotImplementedError
 
+    @property
     def initial_inference(self):
         input_size = int(np.prod(self.observation_shape))
         inputs = tf.keras.Input(
             shape=input_size, dtype="float32", name="input")
         hidden_state = self.representation_network(inputs)
-        reward = 0
         value, policy_logits = self.prediction_network(hidden_state)
         return tf.keras.Model(inputs=[inputs],
-                              outputs=[value, reward, policy_logits, hidden_state])
+                              outputs=[value, policy_logits, hidden_state])
 
+    @property
     def recurrent_inference(self):
         hidden_state = tf.keras.Input(
             shape=self.num_hiddens, dtype="float32", name="hidden_state")
@@ -86,42 +87,45 @@ class BaseMuZeroModel(object):
         pass
 
 
-class MuZeroGoModel(BaseMuZeroModel):
+class MuZeroGoModel(MuZeroBaseModel):
     pass
 
 
-class MuZeroAtariModel(BaseMuZeroModel):
+class MuZeroAtariModel(MuZeroBaseModel):
     pass
 
 
 def keras_mlp(inputs,
               num_layers=2,
               num_hiddens=128,
-              activation="relu"):
+              activation="relu",
+              name=None):
 
     output = inputs
-    for _ in range(num_layers):
+    for i in range(num_layers):
         output = tf.keras.layers.Dense(
-            num_hidden, activation=activation)(output)
+            num_hiddens, activation=activation, name=name+'_'+str(i))(output)
     return output
 
 
-class MuZeroMLPModel(BaseMuZeroModel):
+class MuZeroMLPModel(MuZeroBaseModel):
     def __init__(self,
                  observation_shape,
                  num_actions,
                  num_layers=2,
                  num_hiddens=128,
                  activation="relu"):
-        super(MuZeroMLPModel, self).__init__()
+        super(MuZeroMLPModel, self).__init__(observation_shape,
+                                             num_actions, num_layers, num_hiddens, activation)
 
     def representation_network(self, inputs):
         initial_hidden_state = keras_mlp(
-            inputs, self.num_layers, self.num_hiddens)
+            inputs, self.num_layers, self.num_hiddens, name="representation")
         return initial_hidden_state
 
     def prediction_network(self, hidden_state):
-        torse = keras_mlp(hidden_state, self.num_layers, self.num_hiddens)
+        torso = keras_mlp(hidden_state, self.num_layers,
+                          self.num_hiddens, name="prediction")
 
         policy_logits = tf.keras.layers.Dense(
             self.num_actions, name="policy")(torso)
@@ -131,17 +135,18 @@ class MuZeroMLPModel(BaseMuZeroModel):
 
     def dynamic_network(self, hidden_state):
         next_hidden_state = keras_mlp(
-            hidden_state, self.num_layers, self.num_hiddens)
+            hidden_state, self.num_layers, self.num_hiddens, name='dynamic')
 
-        torse = keras_mlp(
-            hidden_state, self.num_layers, self.num_hiddens)
+        torso = keras_mlp(
+            hidden_state, self.num_layers, self.num_hiddens, name='reward')
         reward = tf.keras.layers.Dense(
             1, activation="tanh", name='reward')(torso)
+        return next_hidden_state, reward
 
 
 class Model(object):
 
-    def __init__(self, muzero_model: BaseMuZeroModel, l2_regularization, learning_rate, device):
+    def __init__(self, muzero_model: MuZeroBaseModel, l2_regularization, learning_rate, device):
 
         if device == "gpu":
             if not tf.test.is_gpu_available():
@@ -162,8 +167,8 @@ class Model(object):
 
     def recurrent_inference(self, hidden_state):
         with self._device:
-            return self._muzero_model.recurrent_inference_model([
-                np.array(hidden_state, dtype=np.float32)])
+            return self._muzero_model.recurrent_inference([
+                hidden_state])
 
     def compute_loss(self):
         pass
@@ -177,6 +182,20 @@ class Model(object):
     def conditional_state(self):
         # get conditional_state when get loss
         pass
+
+    @property
+    def num_trainable_variables(self):
+        num_variables_initial = sum(np.prod(
+            v.shape) for v in self._muzero_model.initial_inference.trainable_variables)
+        num_variable_recurrent = sum(np.prod(
+            v.shape) for v in self._muzero_model.recurrent_inference.trainable_variables)
+        return num_variables_initial + num_variable_recurrent
+
+    def print_trainable_variables(self):
+        for v in self._muzero_model.initial_inference.trainable_variables:
+            print("{}: {}".format(v.name, v.shape))
+        for v in self._muzero_model.recurrent_inference.trainable_variables:
+            print("{}: {}".format(v.name, v.shape))
 
 
 def cascade(x, fns):
