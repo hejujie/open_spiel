@@ -180,7 +180,7 @@ class MuZeroMLPModel(MuZeroBaseModel):
         policy_logits = tf.keras.layers.Dense(
             self.num_actions, name="policy")(torso)
         value = tf.keras.layers.Dense(
-            1, activation="tanh", name="value")(torso)
+            1, activation=None, name="value")(torso)
         return value, policy_logits
 
     def dynamic_network(self, hidden_state):
@@ -190,7 +190,7 @@ class MuZeroMLPModel(MuZeroBaseModel):
         torso = keras_mlp(
             hidden_state, self.num_layers, self.num_hiddens, name='reward')
         reward = tf.keras.layers.Dense(
-            1, activation="tanh", name='reward')(torso)
+            1, activation=None, name='reward')(torso)
         return next_hidden_state, reward
 
 
@@ -253,12 +253,12 @@ class Model(object):
                                                batch.target_reward, batch.target_policy):
                     gradient_scale, value, reward, policy_logits = prediction
                     target_value, target_reward, target_policy = target
-                    value_loss += tf.reduce_mean(scale_gradient(
-                        scalar_loss(value, target_value), gradient_scale))
-                    reward_loss += tf.reduce_mean(scale_gradient(
-                        scalar_loss(reward, target_reward), gradient_scale))
-                    policy_loss += tf.reduce_mean(scale_gradient(tf.nn.softmax_cross_entropy_with_logits(
-                        logits=policy_logits, labels=target_policy), gradient_scale))
+                    value_loss += scale_gradient(tf.reduce_mean(
+                        scalar_loss(value, target_value)), gradient_scale)
+                    reward_loss += scale_gradient(tf.reduce_mean(
+                        scalar_loss(reward, target_reward)), gradient_scale)
+                    policy_loss += scale_gradient(tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
+                        logits=policy_logits, labels=target_policy)), gradient_scale)
 
                 l2_loss += tf.add_n([self._l2_regularization * tf.nn.l2_loss(var)
                                      for var in self._muzero_model.initial_inference.trainable_variables

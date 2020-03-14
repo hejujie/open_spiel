@@ -74,7 +74,7 @@ def build_model(game, model_type) -> model_lib.Model:
     net = model_lib.MuZeroMLPModel(observation_shape, num_actions)
 
     return model_lib.Model(
-        net, l2_regularization=1e-4, learning_rate=0.01, device="cpu")
+        net, l2_regularization=1e-4, learning_rate=0.001, device="cpu")
 
 
 class ModelTest(parameterized.TestCase):
@@ -102,24 +102,23 @@ class ModelTest(parameterized.TestCase):
             target_reward = []
             target_policy = []
             actions = []
-            value, reward, policy, next_hidden = model.initial_inference([obs])
-            target_value.append(1)
-            target_reward.append(2)
-            target_policy.append(np.zeros(len(act_mask), dtype=float))
+            value, reward, policy_logit, next_hidden = model.initial_inference([obs])
+            target_value.append(0.01)
+            target_reward.append(0.02)
+            target_policy.append(policy)
 
             for i in range(unroll_step):
-                value, reward, policy, next_hidden = model.recurrent_inference(
+                value, reward, policy_logit, next_hidden = model.recurrent_inference(
                     next_hidden)
-                target_value.append(i)
-                target_reward.append(i)
-                target_policy.append(np.zeros(len(act_mask), dtype=float))
+                target_value.append(0.01*i)
+                target_reward.append(0.02*i)
+                target_policy.append(policy)
                 actions.append(action)
             train_inputs.append(model_lib.TrainInput(
                 obs, actions, target_value, target_reward, target_policy))
-
-            self.assertLen(policy, 1)
+            self.assertLen(policy_logit, 1)
             self.assertLen(value, 1)
-            self.assertLen(policy[0], game.num_distinct_actions())
+            self.assertLen(policy_logit[0], game.num_distinct_actions())
             self.assertLen(value[0], 1)
 
         losses = []
