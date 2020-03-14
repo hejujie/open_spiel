@@ -83,12 +83,12 @@ class ModelTest(parameterized.TestCase):
     def test_model_learns_simple(self, model_type):
         game = pyspiel.load_game("tic_tac_toe")
         model = build_model(game, model_type)
-        print("Num variables:", model.num_trainable_variables)
-        model.print_trainable_variables()
+        # print("Num variables:", model.num_trainable_variables)
+        # model.print_trainable_variables()
 
         train_inputs = []
         state = game.new_initial_state()
-        new_flag = True
+        unroll_step = 10
         while not state.is_terminal():
             obs = state.observation_tensor()
             act_mask = state.legal_actions_mask()
@@ -96,56 +96,70 @@ class ModelTest(parameterized.TestCase):
             policy = np.zeros(len(act_mask), dtype=float)
             policy[action] = 1
             state.apply_action(action)
-            if new_flag:
-                value, policy, next_hidden = model.initial_inference([obs])
-                new_flag = False
-            else:
+
+            # get train input
+            target_value = []
+            target_reward = []
+            target_policy = []
+            actions = []
+            value, reward, policy, next_hidden = model.initial_inference([obs])
+            target_value.append(1)
+            target_reward.append(2)
+            target_policy.append(np.zeros(len(act_mask), dtype=float))
+
+            for i in range(unroll_step):
                 value, reward, policy, next_hidden = model.recurrent_inference(
                     next_hidden)
+                target_value.append(i)
+                target_reward.append(i)
+                target_policy.append(np.zeros(len(act_mask), dtype=float))
+                actions.append(action)
+            train_inputs.append(model_lib.TrainInput(
+                obs, actions, target_value, target_reward, target_policy))
 
             self.assertLen(policy, 1)
             self.assertLen(value, 1)
             self.assertLen(policy[0], game.num_distinct_actions())
             self.assertLen(value[0], 1)
 
-            # losses = []
-            # for i in range(1000):
-            #     loss = model.update(train_inputs)
-            #     print(i, loss)
-            #     losses.append(loss)
-            #     if loss.policy < 0.05 and loss.value < 0.05:
-            #         break
+        losses = []
+        for i in range(1000):
+            loss = model.update(train_inputs)
+            print(i, loss)
+            losses.append(loss)
+            if loss.policy < 0.05 and loss.value < 0.05:
+                break
 
-            # self.assertGreater(losses[0].total, losses[-1].total)
-            # self.assertGreater(losses[0].policy, losses[-1].policy)
-            # self.assertGreater(losses[0].value, losses[-1].value)
-            # self.assertLess(losses[-1].value, 0.05)
-            # self.assertLess(losses[-1].policy, 0.05)
+        self.assertGreater(losses[0].total, losses[-1].total)
+        self.assertGreater(losses[0].policy, losses[-1].policy)
+        self.assertGreater(losses[0].value, losses[-1].value)
+        self.assertLess(losses[-1].value, 0.05)
+        self.assertLess(losses[-1].policy, 0.05)
 
-            # @parameterized.parameters(model_types)
-            # def test_model_learns_optimal(self, model_type):
-            #     game = pyspiel.load_game("tic_tac_toe")
-            #     solve_game(game.new_initial_state())
+        # @parameterized.parameters(model_types)
+        # def test_model_learns_optimal(self, model_type):
+        #     game = pyspiel.load_game("tic_tac_toe")
+        #     solve_game(game.new_initial_state())
 
-            #     model = build_model(game, model_type)
-            #     print("Num variables:", model.num_trainable_variables)
-            #     model.print_trainable_variables()
+        #     model = build_model(game, model_type)
+        #     print("Num variables:", model.num_trainable_variables)
+        #     model.print_trainable_variables()
 
-            #     train_inputs = list(solved.values())
-            #     print("states:", len(train_inputs))
-            #     losses = []
-            #     for i in range(2000):
-            #         loss = model.update(train_inputs)
-            #         print(i, loss)
-            #         losses.append(loss)
-            #         if loss.policy < 0.1 and loss.value < 0.1:
-            #             break
+        #     train_inputs = list(solved.values())
+        #     print("states:", len(train_inputs))
+        #     losses = []
+        #     for i in range(2000):
+        #         loss = model.update(train_inputs)
+        #         print(i, loss)
+        #         losses.append(loss)
+        #         if loss.policy < 0.1 and loss.value < 0.1:
+        #             break
 
-            #     self.assertGreater(losses[0].policy, losses[-1].policy)
-            #     self.assertGreater(losses[0].value, losses[-1].value)
-            #     self.assertGreater(losses[0].total, losses[-1].total)
-            #     self.assertLess(losses[-1].value, 0.1)
-            #     self.assertLess(losses[-1].policy, 0.1)
+        #     self.assertGreater(losses[0].policy, losses[-1].policy)
+        #     self.assertGreater(losses[0].value, losses[-1].value)
+        #     self.assertGreater(losses[0].total, losses[-1].total)
+        #     self.assertLess(losses[-1].value, 0.1)
+        #     self.assertLess(losses[-1].policy, 0.1)
 
 
 if __name__ == "__main__":

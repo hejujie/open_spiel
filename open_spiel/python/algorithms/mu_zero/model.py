@@ -39,6 +39,56 @@ import numpy as np
 import tensorflow.compat.v1 as tf
 
 
+class TrainInput(collections.namedtuple(
+        "TrainInput", "observation actions target_value, target_reward, target_policy")):
+    """Inputs for training the Model."""
+
+    @staticmethod
+    def stack(train_inputs):
+        observation, actions, target_vs, target_rs, target_ps = zip(
+            *train_inputs)
+        actions = list(zip(actions))
+        # print("before", target_vs)
+        target_vs = list(zip(*list(target_vs)))
+        target_rs = list(zip(*list(target_rs)))
+        target_ps = list(zip(*list(target_ps)))
+        result = TrainInput(
+            np.array(observation, dtype=np.float32),
+            np.expand_dims(np.array(actions), -1),
+            np.expand_dims(np.array(target_vs), -1),
+            np.expand_dims(np.array(target_rs), -1),
+            np.array(target_ps))
+        # print("target out", result.targets)
+        # print("obs", result.observation.shape)
+        # print("action out", result.actions)
+        # print("target_vs", result.target_value.shape)
+        # print("target_rs", result.target_reward.shape)
+        # print("target_ps", result.target_policy.shape)
+
+        return result
+
+
+class Losses(collections.namedtuple("Losses", "policy value reward l2")):
+    """Losses from a training step."""
+
+    @property
+    def total(self):
+        return self.policy + self.value + self.reward + self.l2
+
+    def __str__(self):
+        return ("Losses(total: {:.3f}, policy: {:.3f}, value: {:.3f}, reward: {:.3f}, "
+                "l2: {:.3f})").format(self.total, self.policy, self.value, self.reward, self.l2)
+
+    def __add__(self, other):
+        return Losses(self.policy + other.policy,
+                      self.value + other.value,
+                      self.reward + other.reward,
+                      self.l2 + other.l2)
+
+    def __truediv__(self, n):
+        return Losses(self.policy / n, self.value / n, self.reward / n, self.l2 / n)
+
+
 class MuZeroBaseModel(object):
     def __init__(self,
                  observation_shape,
@@ -51,6 +101,8 @@ class MuZeroBaseModel(object):
         self.num_layers = num_layers
         self.num_hiddens = num_hiddens
         self.activation = activation
+        self.initial_inference = self.initial_inference_process()
+        self.recurrent_inference = self.recurrent_inference_process()
 
     def representation_network(self):
         raise NotImplementedError
@@ -61,8 +113,7 @@ class MuZeroBaseModel(object):
     def prediction_network(self):
         raise NotImplementedError
 
-    @property
-    def initial_inference(self):
+    def initial_inference_process(self):
         input_size = int(np.prod(self.observation_shape))
         inputs = tf.keras.Input(
             shape=input_size, dtype="float32", name="input")
@@ -71,8 +122,7 @@ class MuZeroBaseModel(object):
         return tf.keras.Model(inputs=[inputs],
                               outputs=[value, policy_logits, hidden_state])
 
-    @property
-    def recurrent_inference(self):
+    def recurrent_inference_process(self):
         hidden_state = tf.keras.Input(
             shape=self.num_hiddens, dtype="float32", name="hidden_state")
         next_hidden_state, reward = self.dynamic_network(hidden_state)
@@ -144,6 +194,14 @@ class MuZeroMLPModel(MuZeroBaseModel):
         return next_hidden_state, reward
 
 
+def scalar_loss(prediction, target):
+    return tf.keras.losses.MSE(target, prediction)
+
+
+def scale_gradient(loss, factor):
+    return (1 - factor) * tf.stop_gradient(loss) + factor * loss
+
+
 class Model(object):
 
     def __init__(self, muzero_model: MuZeroBaseModel, l2_regularization, learning_rate, device):
@@ -162,22 +220,63 @@ class Model(object):
 
     def initial_inference(self, obs):
         with self._device:
-            return self._muzero_model.initial_inference([
+            value, policy, hidden_state = self._muzero_model.initial_inference([
                 np.array(obs, dtype=np.float32)])
+            return value, value*0, policy, hidden_state
 
     def recurrent_inference(self, hidden_state):
         with self._device:
             return self._muzero_model.recurrent_inference([
                 hidden_state])
 
-    def compute_loss(self):
-        pass
+    def update(self, train_inputs: Sequence[TrainInput]):
+        batch = TrainInput.stack(train_inputs)
 
-    def update(self):
-        # get batch data
-        # get loss for difference step
-        # grads, apply_grads
-        pass
+        policy_loss = 0
+        value_loss = 0
+        reward_loss = 0
+        l2_loss = 0
+        with self._device:
+            with tf.GradientTape() as tape:
+                observation, actions = batch.observation, batch.actions
+                value, policy_logits, next_hidden = self._muzero_model.initial_inference(
+                    [observation], training=True)
+                predictions = [(1.0, value, value*0, policy_logits)]
+                for action in actions:
+                    value, reward, policy_logits, next_hidden = self._muzero_model.recurrent_inference(
+                        [next_hidden], training=True)
+                    predictions.append(
+                        (1/len(actions), value, reward, policy_logits))
+                    next_hidden = scale_gradient(next_hidden, 0.5)
+
+                for prediction, *target in zip(predictions, batch.target_value,
+                                               batch.target_reward, batch.target_policy):
+                    gradient_scale, value, reward, policy_logits = prediction
+                    target_value, target_reward, target_policy = target
+                    value_loss += tf.reduce_mean(scale_gradient(
+                        scalar_loss(value, target_value), gradient_scale))
+                    reward_loss += tf.reduce_mean(scale_gradient(
+                        scalar_loss(reward, target_reward), gradient_scale))
+                    policy_loss += tf.reduce_mean(scale_gradient(tf.nn.softmax_cross_entropy_with_logits(
+                        logits=policy_logits, labels=target_policy), gradient_scale))
+
+                l2_loss += tf.add_n([self._l2_regularization * tf.nn.l2_loss(var)
+                                     for var in self._muzero_model.initial_inference.trainable_variables
+                                     if "/bias:" not in var.name])
+                l2_loss += tf.add_n([self._l2_regularization * tf.nn.l2_loss(var)
+                                     for var in self._muzero_model.recurrent_inference.trainable_variables
+                                     if "/bias:" not in var.name])
+
+                loss = value_loss + reward_loss + policy_loss + l2_loss
+
+            trainable_variable = self.get_trainable_variable()
+            grads = tape.gradient(loss, trainable_variable)
+
+            self._optimizer.apply_gradients(
+                zip(grads, trainable_variable),
+                global_step=tf.train.get_or_create_global_step())
+        return Losses(policy=float(policy_loss), value=float(value_loss),
+                      reward=float(reward_loss), l2=float(l2_loss))
 
     def conditional_state(self):
         # get conditional_state when get loss
@@ -196,6 +295,11 @@ class Model(object):
             print("{}: {}".format(v.name, v.shape))
         for v in self._muzero_model.recurrent_inference.trainable_variables:
             print("{}: {}".format(v.name, v.shape))
+
+    def get_trainable_variable(self):
+        variable = (self._muzero_model.initial_inference.trainable_variables +
+                    self._muzero_model.recurrent_inference.trainable_variables)
+        return variable
 
 
 def cascade(x, fns):
