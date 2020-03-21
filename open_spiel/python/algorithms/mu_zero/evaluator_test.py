@@ -40,88 +40,139 @@ import pyspiel
 tf.enable_eager_execution()
 
 
-def build_model(game):
-  num_actions = game.num_distinct_actions()
-  observation_shape = game.observation_tensor_shape()
-  net = model_lib.keras_mlp(
-      observation_shape, num_actions, num_layers=2, num_hidden=64)
-  return model_lib.Model(
-      net, l2_regularization=1e-4, learning_rate=0.01, device="cpu")
+def build_model(game) -> model_lib.Model:
+    num_actions = game.num_distinct_actions()
+    observation_shape = game.observation_tensor_shape()
+    net = model_lib.MuZeroMLPModel(observation_shape, num_actions)
+    return model_lib.Model(
+        net, l2_regularization=1e-4, learning_rate=0.001, device="cpu")
 
 
 class EvaluatorTest(absltest.TestCase):
 
-  def test_evaluator_caching(self):
-    game = pyspiel.load_game("tic_tac_toe")
-    model = build_model(game)
-    evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
+    def test_evaluator_initial_network_caching(self):
+        game = pyspiel.load_game("tic_tac_toe")
+        model = build_model(game)
+        evaluator = evaluator_lib.MuZeroEvaluator(game, model)
 
-    state = game.new_initial_state()
-    obs = state.observation_tensor()
-    act_mask = state.legal_actions_mask()
-    action = state.legal_actions()[0]
-    policy = np.zeros(len(act_mask), dtype=float)
-    policy[action] = 1
-    train_inputs = [model_lib.TrainInput(obs, act_mask, policy, value=1)]
+        state = game.new_initial_state()
 
-    value = evaluator.evaluate(state)
-    self.assertEqual(value[0], -value[1])
-    value = value[0]
+        value = evaluator.initial_evaluate(state)
+        self.assertEqual(value[0], -value[1])
+        value = value[0]
 
-    value2 = evaluator.evaluate(state)[0]
-    self.assertEqual(value, value2)
+        value2 = evaluator.initial_evaluate(state)[0]
+        self.assertEqual(value, value2)
 
-    prior = evaluator.prior(state)
-    prior2 = evaluator.prior(state)
-    np.testing.assert_array_equal(prior, prior2)
+        prior = evaluator.initial_prior(state)
+        prior2 = evaluator.initial_prior(state)
+        np.testing.assert_array_equal(prior, prior2)
 
-    info = evaluator.cache_info()
-    self.assertEqual(info.misses, 1)
-    self.assertEqual(info.hits, 3)
+        info = evaluator.initial_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 3)
 
-    for _ in range(20):
-      model.update(train_inputs)
+        # change model in evalutor
+        evaluator._model = build_model(game)
 
-    # Still equal due to not clearing the cache
-    value3 = evaluator.evaluate(state)[0]
-    self.assertEqual(value, value3)
+        # Still equal due to not clearing the cache
+        value3 = evaluator.initial_evaluate(state)[0]
+        self.assertEqual(value, value3)
 
-    info = evaluator.cache_info()
-    self.assertEqual(info.misses, 1)
-    self.assertEqual(info.hits, 4)
+        info = evaluator.initial_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 4)
 
-    evaluator.clear_cache()
+        evaluator.clear_cache()
 
-    info = evaluator.cache_info()
-    self.assertEqual(info.misses, 0)
-    self.assertEqual(info.hits, 0)
+        info = evaluator.initial_cache_info()
+        self.assertEqual(info.misses, 0)
+        self.assertEqual(info.hits, 0)
 
-    # Now they differ from before
-    value4 = evaluator.evaluate(state)[0]
-    value5 = evaluator.evaluate(state)[0]
-    self.assertNotEqual(value, value4)
-    self.assertEqual(value4, value5)
+        # Now they differ from before
+        value4 = evaluator.initial_evaluate(state)[0]
+        value5 = evaluator.initial_evaluate(state)[0]
+        self.assertNotEqual(value, value4)
+        self.assertEqual(value4, value5)
 
-    info = evaluator.cache_info()
-    self.assertEqual(info.misses, 1)
-    self.assertEqual(info.hits, 1)
+        info = evaluator.initial_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 1)
 
-    value6 = evaluator.evaluate(game.new_initial_state())[0]
-    self.assertEqual(value4, value6)
+        value6 = evaluator.initial_evaluate(game.new_initial_state())[0]
+        self.assertEqual(value4, value6)
 
-    info = evaluator.cache_info()
-    self.assertEqual(info.misses, 1)
-    self.assertEqual(info.hits, 2)
+        info = evaluator.initial_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 2)
 
-  def test_works_with_mcts(self):
-    game = pyspiel.load_game("tic_tac_toe")
-    model = build_model(game)
-    evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
-    bot = mcts.MCTSBot(
-        game, 1., 20, evaluator, solve=False, dirichlet_noise=(0.25, 1.))
-    root = bot.mcts_search(game.new_initial_state())
-    self.assertEqual(root.explore_count, 20)
+    def test_evaluator_recurrent_network_caching(self):
+        game = pyspiel.load_game("tic_tac_toe")
+        model = build_model(game)
+        evaluator = evaluator_lib.MuZeroEvaluator(game, model)
+
+        state = game.new_initial_state()
+        obs = state.observation_tensor()
+        next_hidden = model.initial_inference([obs])[-1]
+
+        value = evaluator.recurrent_evaluate(next_hidden)
+        self.assertEqual(value[0], -value[1])
+        value = value[0]
+
+        value2 = evaluator.recurrent_evaluate(next_hidden)[0]
+        self.assertEqual(value, value2)
+
+        prior = evaluator.recurrent_prior(next_hidden)
+        prior2 = evaluator.recurrent_prior(next_hidden)
+        np.testing.assert_array_equal(prior, prior2)
+
+        info = evaluator.recurrent_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 3)
+
+        # change model in evalutor
+        evaluator._model = build_model(game)
+
+        # Still equal due to not clearing the cache
+        value3 = evaluator.recurrent_evaluate(next_hidden)[0]
+        self.assertEqual(value, value3)
+
+        info = evaluator.recurrent_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 4)
+
+        evaluator.clear_cache()
+
+        info = evaluator.recurrent_cache_info()
+        self.assertEqual(info.misses, 0)
+        self.assertEqual(info.hits, 0)
+
+        # Now they differ from before
+        value4 = evaluator.recurrent_evaluate(next_hidden)[0]
+        value5 = evaluator.recurrent_evaluate(next_hidden)[0]
+        self.assertNotEqual(value, value4)
+        self.assertEqual(value4, value5)
+
+        info = evaluator.recurrent_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 1)
+
+        value6 = evaluator.recurrent_evaluate(next_hidden)[0]
+        self.assertEqual(value4, value6)
+
+        info = evaluator.recurrent_cache_info()
+        self.assertEqual(info.misses, 1)
+        self.assertEqual(info.hits, 2)
+
+    # def test_works_with_mcts(self):
+    #     game = pyspiel.load_game("tic_tac_toe")
+    #     model = build_model(game)
+    #     evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
+    #     bot = mcts.MCTSBot(
+    #         game, 1., 20, evaluator, solve=False, dirichlet_noise=(0.25, 1.))
+    #     root = bot.mcts_search(game.new_initial_state())
+    #     self.assertEqual(root.explore_count, 20)
 
 
 if __name__ == "__main__":
-  absltest.main()
+    absltest.main()

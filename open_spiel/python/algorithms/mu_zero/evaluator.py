@@ -26,56 +26,83 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""An MCTS Evaluator for an AlphaZero model."""
+"""An MCTS Evaluator for an MuZero model."""
 
 import numpy as np
+import tensorflow.compat.v1 as tf
 
-from open_spiel.python.algorithms import mcts
 import pyspiel
+from open_spiel.python.algorithms.mu_zero import muzero_mcts
+from open_spiel.python.algorithms.mu_zero import model as model_lib
 from open_spiel.python.utils import lru_cache
 
 
-class AlphaZeroEvaluator(mcts.Evaluator):
-  """An AlphaZero MCTS Evaluator."""
-
-  def __init__(self, game, model, cache_size=2**16):
+class MuZeroEvaluator(muzero_mcts.Evaluator):
     """An AlphaZero MCTS Evaluator."""
-    game_type = game.get_type()
-    if game_type.reward_model != pyspiel.GameType.RewardModel.TERMINAL:
-      raise ValueError("Game must have terminal rewards.")
-    if game_type.dynamics != pyspiel.GameType.Dynamics.SEQUENTIAL:
-      raise ValueError("Game must have sequential turns.")
-    if game_type.chance_mode != pyspiel.GameType.ChanceMode.DETERMINISTIC:
-      raise ValueError("Game must be deterministic.")
 
-    self._model = model
-    self._cache = lru_cache.LRUCache(cache_size)
+    def __init__(self, game, model: model_lib.Model, cache_size=2**16):
+        """An AlphaZero MCTS Evaluator."""
+        game_type = game.get_type()
+        if game_type.reward_model != pyspiel.GameType.RewardModel.TERMINAL:
+            raise ValueError("Game must have terminal rewards.")
+        if game_type.dynamics != pyspiel.GameType.Dynamics.SEQUENTIAL:
+            raise ValueError("Game must have sequential turns.")
+        if game_type.chance_mode != pyspiel.GameType.ChanceMode.DETERMINISTIC:
+            raise ValueError("Game must be deterministic.")
 
-  def cache_info(self):
-    return self._cache.info()
+        self.num_actions = game.num_distinct_actions()
+        self._model = model
+        # use two cache to avoid same key in two inference function
+        self._initial_cache = lru_cache.LRUCache(cache_size)
+        self._recurrent_cache = lru_cache.LRUCache(cache_size)
 
-  def clear_cache(self):
-    self._cache.clear()
+    def initial_cache_info(self):
+        return self._initial_cache.info()
 
-  def _inference(self, state):
-    # Make a singleton batch
-    obs = np.expand_dims(state.observation_tensor(), 0)
-    mask = np.expand_dims(state.legal_actions_mask(), 0)
+    def recurrent_cache_info(self):
+        return self._recurrent_cache.info()
 
-    # ndarray isn't hashable
-    cache_key = obs.tobytes() + mask.tobytes()
+    def clear_cache(self):
+        self._initial_cache.clear()
+        self._recurrent_cache.clear()
 
-    value, policy = self._cache.make(
-        cache_key, lambda: self._model.inference(obs, mask))
+    def _initial_inference(self, state):
+        obs = np.expand_dims(state.observation_tensor(), 0)
 
-    return value[0, 0], policy[0]  # Unpack batch
+        # ndarray isn't hashable
+        cache_key = obs.tobytes()
 
-  def evaluate(self, state):
-    """Returns a value for the given state."""
-    value, _ = self._inference(state)
-    return np.array([value, -value])
+        value, reward, policy_logits, next_hidden = self._initial_cache.make(
+            cache_key, lambda: self._model.initial_inference(obs))
 
-  def prior(self, state):
-    """Returns the probabilities for all actions."""
-    _, policy = self._inference(state)
-    return [(action, policy[action]) for action in state.legal_actions()]
+        return value[0, 0], policy_logits[0]  # Unpack batch
+
+    def _recurrent_inference(self, next_hidden):
+        cache_key = hash(next_hidden)
+
+        value, reward, policy_logits, next_hidden = self._recurrent_cache.make(
+            cache_key, lambda: self._model.recurrent_inference(next_hidden)
+        )
+
+        return value[0, 0], policy_logits[0]  # Unpack batch
+
+    def initial_evaluate(self, state):
+        """Returns a value for the given state."""
+        value, _, = self._initial_inference(state)
+        return np.array([value, -value])
+
+    def initial_prior(self, state):
+        """Returns the probabilities for all actions."""
+        _, policy = self._initial_inference(state)
+        return [(action, policy[action]) for action in state.legal_actions()]
+
+    def recurrent_evaluate(self, next_hidden):
+        """Returns a value for the given hidden state."""
+        value, _, = self._recurrent_inference(next_hidden)
+        return np.array([value, -value])
+
+    def recurrent_prior(self, next_hidden):
+        """Returns the probabilities for all actions."""
+        _, policy = self._recurrent_inference(next_hidden)
+        # need to find action space for game
+        return [(action, policy[action]) for action in range(self.num_actions)]
