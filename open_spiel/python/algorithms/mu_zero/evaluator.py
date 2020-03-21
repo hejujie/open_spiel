@@ -78,7 +78,9 @@ class MuZeroEvaluator(muzero_mcts.Evaluator):
         return value[0, 0], policy_logits[0]  # Unpack batch
 
     def _recurrent_inference(self, next_hidden):
-        cache_key = hash(next_hidden)
+        # tf.tensor is hashable
+        # but the hash value of two tensor with same data is not the same
+        cache_key = np.array(next_hidden).tobytes()
 
         value, reward, policy_logits, next_hidden = self._recurrent_cache.make(
             cache_key, lambda: self._model.recurrent_inference(next_hidden)

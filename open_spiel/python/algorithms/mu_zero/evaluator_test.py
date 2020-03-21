@@ -114,6 +114,8 @@ class EvaluatorTest(absltest.TestCase):
         state = game.new_initial_state()
         obs = state.observation_tensor()
         next_hidden = model.initial_inference([obs])[-1]
+        next_hidden2 = model.initial_inference([obs])[-1]
+        tf.debugging.assert_equal(next_hidden, next_hidden2)
 
         value = evaluator.recurrent_evaluate(next_hidden)
         self.assertEqual(value[0], -value[1])
@@ -157,7 +159,9 @@ class EvaluatorTest(absltest.TestCase):
         self.assertEqual(info.misses, 1)
         self.assertEqual(info.hits, 1)
 
-        value6 = evaluator.recurrent_evaluate(next_hidden)[0]
+        self.assertEqual(np.array(next_hidden).tobytes(),
+                         np.array(next_hidden2).tobytes())
+        value6 = evaluator.recurrent_evaluate(next_hidden2)[0]
         self.assertEqual(value4, value6)
 
         info = evaluator.recurrent_cache_info()
